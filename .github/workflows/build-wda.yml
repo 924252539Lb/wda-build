@@ -1,0 +1,69 @@
+name: Build unsigned WebDriverAgent
+"on":
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: appium/WebDriverAgent branch or tag
+        default: master
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Show toolchain
+        run: xcodebuild -version && xcodebuild -showsdks | grep -i iphoneos
+
+      - name: Clone WebDriverAgent source
+        run: |
+          git clone --depth 1 -b "${{ inputs.branch || 'master' }}" https://github.com/appium/WebDriverAgent wda
+          cd wda
+          git log -1 --format='%H %s'
+          xcodebuild -list -project WebDriverAgent.xcodeproj
+
+      - name: Build for testing (no code signing)
+        working-directory: wda
+        run: |
+          xcodebuild build-for-testing \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -derivedDataPath dd \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            EXPANDED_CODE_SIGN_IDENTITY= \
+            DEVELOPER_TEAM= \
+            PROVISIONING_PROFILE_SPECIFIER= \
+            | tee build.log
+
+      - name: Package .ipa
+        working-directory: wda
+        run: |
+          set -e
+          APP=$(find dd/Build/Products -maxdepth 2 -name "*-Runner.app" -type d | head -n1)
+          if [ -z "$APP" ]; then
+            echo "!! no *-Runner.app produced"; ls -R dd/Build/Products | head -60; exit 1
+          fi
+          echo "APP=$APP"
+          plutil -p "$APP/Info.plist"
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" "Payload/"
+          cd Payload
+          find . -name "*.framework" -prune -o -type f -perm +111 -print | head -20
+          cd ..
+          BASE=$(basename "$APP")
+          # TrollStore 只吃未签名包，清掉任何残留签名
+          codesign --remove-signature --recursive "Payload/$BASE" 2>/dev/null || true
+          file "Payload/$BASE/$BASE" 2>/dev/null || true
+          zip -qry WebDriverAgent-Runner.unsigned.ipa Payload
+          ls -l WebDriverAgent-Runner.unsigned.ipa
+          unzip -l WebDriverAgent-Runner.unsigned.ipa | head -40
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WebDriverAgent-Runner-unsigned-ipa
+          path: wda/WebDriverAgent-Runner.unsigned.ipa
+          if-no-files-found: error
